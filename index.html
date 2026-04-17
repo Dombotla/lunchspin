@@ -578,7 +578,7 @@
 
 <div class="app">
   <header>
-    <div class="logo">lunch<span>spin</span><sup>™</sup></div>
+    <div class="logo" onclick="showPage('spinner')" style="cursor:pointer">lunch<span>spin</span><sup>™</sup></div>
     <nav>
       <button class="active" id="nav-spinner" onclick="showPage('spinner')">Spinner</button>
       <button id="nav-manage" onclick="showPage('manage')">Manage spots</button>
@@ -719,12 +719,13 @@
 
 <script>
   // ── Constants ──────────────────────────────────────────────────────
-  const STORAGE_KEY   = 'lunchspin_spots_v4';
-  const HISTORY_KEY   = 'lunchspin_history_v1';
-  const HISTORY_MAX   = 5;
-  const FUN_NAMES     = { 1: 'Very tame', 2: 'Pretty fun', 3: 'Very fun' };
-  const PALETTE       = ['#e8c547','#4caf82','#e85a3a','#5b9bd5','#e8944a','#4cc4c0','#b5d55b','#d46b6b','#7b8fd4','#85c88a'];
-  const WILD_COLOR    = '#c67fd4';
+  const SUPABASE_URL = 'https://jwqazppavzpdnyktgfvx.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_tdw8jfHMwXewnloFYsw71A_CzAzDu3N';
+  const HISTORY_KEY  = 'lunchspin_history_v1';
+  const HISTORY_MAX  = 5;
+  const FUN_NAMES    = { 1: 'Very tame', 2: 'Pretty fun', 3: 'Very fun' };
+  const PALETTE      = ['#e8c547','#4caf82','#e85a3a','#5b9bd5','#e8944a','#4cc4c0','#b5d55b','#d46b6b','#7b8fd4','#85c88a'];
+  const WILD_COLOR   = '#c67fd4';
   const WILD_FRACTION = 0.10;
 
   // ── State ──────────────────────────────────────────────────────────
@@ -738,14 +739,65 @@
   let currentAngle = 0;
   let lastSegs     = [];
 
+  // ── Supabase helpers ───────────────────────────────────────────────
+  async function sbFetch(path, options = {}) {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+      ...options,
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation',
+        ...(options.headers || {}),
+      },
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
+  }
+
   // ── Storage ────────────────────────────────────────────────────────
-  function loadData() {
-    try { const r = localStorage.getItem(STORAGE_KEY); if (r) spots   = JSON.parse(r); } catch { spots   = []; }
+  async function loadData() {
+    // History stays local (personal per device)
     try { const h = localStorage.getItem(HISTORY_KEY); if (h) history = JSON.parse(h); } catch { history = []; }
+
+    // Spots come from Supabase (shared)
+    setLoadingState(true);
+    try {
+      const data = await sbFetch('spots?select=*&order=id.asc');
+      spots = data || [];
+    } catch (e) {
+      console.error('Failed to load spots:', e);
+      showToast('Could not load spots — check connection');
+      spots = [];
+    } finally {
+      setLoadingState(false);
+    }
     render();
   }
-  function saveSpots()   { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(spots));   } catch {} }
-  function saveHistory() { try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history)); } catch {} }
+
+  function setLoadingState(loading) {
+    document.getElementById('spinBtn').disabled = loading;
+    document.getElementById('spotsList').innerHTML = loading
+      ? '<div class="empty-list">Loading…</div>'
+      : '';
+  }
+
+  function saveHistory() {
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history)); } catch {}
+  }
+
+  async function saveSpot(spot) {
+    const data = await sbFetch('spots', {
+      method: 'POST',
+      body: JSON.stringify({ name: spot.name, fun: spot.fun, max: spot.max || null }),
+    });
+    return data && data[0] ? data[0] : null;
+  }
+
+  async function removeSpot(id) {
+    await sbFetch(`spots?id=eq.${id}`, { method: 'DELETE' });
+  }
 
   // ── UI helpers ─────────────────────────────────────────────────────
   function showPage(id) {
@@ -852,9 +904,9 @@
       ctx.fill();
       if (segs.length > 1) { ctx.strokeStyle = '#0f0e0c'; ctx.lineWidth = 2; ctx.stroke(); }
 
-      const mid = start + seg.arc / 2;
+      const mid      = start + seg.arc / 2;
       const maxLen   = segs.length > 6 ? 10 : 14;
-      const rawLabel = seg.isWild ? '✦ Wild card' : seg.name;
+      const rawLabel = chaosActive ? '?' : (seg.isWild ? '✦ Wild card' : seg.name);
       const label    = rawLabel.length > maxLen ? rawLabel.slice(0, maxLen - 1) + '…' : rawLabel;
 
       ctx.save();
@@ -862,7 +914,9 @@
       ctx.rotate(mid);
       ctx.textAlign = 'right';
       ctx.fillStyle = isWinner ? '#0f0e0c' : 'rgba(0,0,0,0.82)';
-      ctx.font = `500 ${segs.length > 8 ? 11 : 13}px 'DM Sans', sans-serif`;
+      const fontSize = chaosActive ? 16 : (segs.length > 8 ? 11 : 13);
+      const weight   = chaosActive ? '800' : '500';
+      ctx.font = `${weight} ${fontSize}px 'DM Sans', sans-serif`;
       ctx.fillText(label, r - 10, 4);
       ctx.restore();
 
@@ -1034,6 +1088,11 @@
       chaosActive ? 'All spots — feeling lucky' : FUN_NAMES[currentLevel] + ' spots';
 
     const el = document.getElementById('spotPills');
+
+    if (chaosActive) {
+      el.innerHTML = '<div class="no-spots-msg" style="font-style:italic">It\'s a surprise — just spin! 🎲</div>';
+      return;
+    }
     if (!segs || !segs.length) {
       el.innerHTML = '<div class="no-spots-msg">None yet — add some on the Manage page.</div>';
       return;
@@ -1099,7 +1158,7 @@
     );
   }
 
-  function addSpot() {
+  async function addSpot() {
     const nameEl = document.getElementById('spotName');
     const maxEl  = document.getElementById('spotMax');
     const name   = nameEl.value.trim();
@@ -1107,16 +1166,26 @@
     if (spots.some(s => s.name.toLowerCase() === name.toLowerCase())) {
       showToast('That spot already exists!'); return;
     }
-    spots.push({ id: Date.now(), name, fun: selectedFun, max: maxEl.value ? parseInt(maxEl.value) : null });
-    saveSpots();
-    nameEl.value = ''; maxEl.value = '';
-    render();
-    showToast('Spot added!');
+    try {
+      const saved = await saveSpot({ name, fun: selectedFun, max: maxEl.value ? parseInt(maxEl.value) : null });
+      if (saved) spots.push(saved);
+      nameEl.value = ''; maxEl.value = '';
+      render();
+      showToast('Spot added!');
+    } catch (e) {
+      showToast('Could not save spot — try again');
+    }
   }
 
-  function deleteSpot(id) {
-    spots = spots.filter(s => s.id !== id);
-    saveSpots(); render(); showToast('Spot removed');
+  async function deleteSpot(id) {
+    try {
+      await removeSpot(id);
+      spots = spots.filter(s => s.id !== id);
+      render();
+      showToast('Spot removed');
+    } catch (e) {
+      showToast('Could not remove spot — try again');
+    }
   }
 
   // ── Empty state ────────────────────────────────────────────────────
